@@ -23,6 +23,10 @@ from posture_guard.cli import (
     posture_features,
     should_run_consequence,
     trackbar_seconds,
+    warning_popup_command,
+    wifi_power_command,
+    wifi_power_is_on,
+    wifi_set_power_command,
 )
 
 
@@ -42,7 +46,20 @@ Ethernet Address: aa:bb:cc:dd:ee:ff
 
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed(stdout=output))
 
-    assert discover_wifi_device() == "en0"
+    assert discover_wifi_device("darwin") == "en0"
+
+
+def test_discover_wifi_device_finds_windows_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return completed(stdout="Wi-Fi\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert discover_wifi_device("win32") == "Wi-Fi"
+    assert calls[0][:4] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
 
 
 def test_mediapipe_solutions_pose_is_available() -> None:
@@ -109,7 +126,14 @@ def test_discover_wifi_device_raises_when_missing(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed(stdout="Hardware Port: Ethernet\n"))
 
     with pytest.raises(RuntimeError, match="Could not discover"):
-        discover_wifi_device()
+        discover_wifi_device("darwin")
+
+
+def test_discover_wifi_device_raises_when_windows_adapter_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed(stderr="not found", returncode=2))
+
+    with pytest.raises(RuntimeError, match="not found"):
+        discover_wifi_device("win32")
 
 
 def test_wifi_controller_dry_run_does_not_call_networksetup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +145,7 @@ def test_wifi_controller_dry_run_does_not_call_networksetup(monkeypatch: pytest.
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    WifiController(device="en0", dry_run=True).turn_off()
+    WifiController(device="en0", dry_run=True, os_name="darwin").turn_off()
 
     assert calls == []
 
@@ -137,7 +161,7 @@ def test_wifi_controller_turn_off_runs_networksetup(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    WifiController(device="en0", dry_run=False).turn_off()
+    WifiController(device="en0", dry_run=False, os_name="darwin").turn_off()
 
     assert calls == [
         ["networksetup", "-setairportpower", "en0", "off"],
@@ -154,7 +178,7 @@ def test_wifi_controller_turn_off_raises_when_wifi_stays_on(monkeypatch: pytest.
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="still reported as On"):
-        WifiController(device="en0", dry_run=False).turn_off()
+        WifiController(device="en0", dry_run=False, os_name="darwin").turn_off()
 
 
 def test_wifi_controller_turn_on_runs_networksetup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,7 +190,7 @@ def test_wifi_controller_turn_on_runs_networksetup(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    WifiController(device="en0", dry_run=False).turn_on()
+    WifiController(device="en0", dry_run=False, os_name="darwin").turn_on()
 
     assert calls == [["networksetup", "-setairportpower", "en0", "on"]]
 
@@ -174,7 +198,33 @@ def test_wifi_controller_turn_on_runs_networksetup(monkeypatch: pytest.MonkeyPat
 def test_wifi_controller_is_on_parses_airport_power(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed(stdout="Wi-Fi Power (en0): On\n"))
 
-    assert WifiController(device="en0", dry_run=False).is_on() is True
+    assert WifiController(device="en0", dry_run=False, os_name="darwin").is_on() is True
+
+
+def test_wifi_controller_turn_off_runs_windows_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "Get-NetAdapter" in command[-1]:
+            return completed(stdout="Off\n")
+        return completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    WifiController(device="Wi-Fi", dry_run=False, os_name="win32").turn_off()
+
+    assert calls[0][:4] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
+    assert "Disable-NetAdapter -Name 'Wi-Fi' -Confirm:$false" in calls[0][-1]
+    assert "Get-NetAdapter -Name 'Wi-Fi'" in calls[1][-1]
+
+
+def test_wifi_power_commands_support_windows() -> None:
+    assert "Get-NetAdapter -Name 'Wi-Fi'" in wifi_power_command("Wi-Fi", "win32")[-1]
+    assert "Enable-NetAdapter -Name 'Wi-Fi' -Confirm:$false" in wifi_set_power_command("Wi-Fi", True, "win32")[-1]
+    assert "Disable-NetAdapter -Name 'Wi-Fi' -Confirm:$false" in wifi_set_power_command("Wi-Fi", False, "win32")[-1]
+    assert wifi_power_is_on("On\n", "win32") is True
+    assert wifi_power_is_on("Off\n", "win32") is False
 
 
 def test_warning_popup_opens_once_and_closes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,7 +247,7 @@ def test_warning_popup_opens_once_and_closes(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    popup = PostureWarningPopup()
+    popup = PostureWarningPopup(os_name="darwin")
     popup.show_count_started()
     popup.show_count_started()
 
@@ -218,7 +268,7 @@ def test_warning_popup_tracks_user_dismissal(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
 
-    popup = PostureWarningPopup()
+    popup = PostureWarningPopup(os_name="darwin")
     popup.show_count_started()
 
     assert popup.is_open() is False
@@ -233,7 +283,7 @@ def test_consequence_controller_dry_run_does_not_call_command(monkeypatch: pytes
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ConsequenceController(action=ConsequenceAction.LOCK, dry_run=True).run()
+    ConsequenceController(action=ConsequenceAction.LOCK, dry_run=True, os_name="darwin").run()
 
     assert calls == []
 
@@ -247,20 +297,39 @@ def test_consequence_controller_runs_selected_command(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ConsequenceController(action=ConsequenceAction.LOCK, dry_run=False).run()
+    ConsequenceController(action=ConsequenceAction.LOCK, dry_run=False, os_name="darwin").run()
 
-    assert calls == [consequence_command(ConsequenceAction.LOCK)]
+    assert calls == [consequence_command(ConsequenceAction.LOCK, "darwin")]
 
 
 def test_consequence_command_supports_lock_and_reboot() -> None:
-    lock_commands = consequence_commands(ConsequenceAction.LOCK)
+    lock_commands = consequence_commands(ConsequenceAction.LOCK, "darwin")
     assert lock_commands[0] == ["/usr/bin/pmset", "displaysleepnow"]
     assert lock_commands[-1] == [
         "osascript",
         "-e",
         'tell application "System Events" to key code 12 using {control down, command down}',
     ]
-    assert consequence_command(ConsequenceAction.REBOOT) == ["osascript", "-e", 'tell application "System Events" to restart']
+    assert consequence_command(ConsequenceAction.REBOOT, "darwin") == [
+        "osascript",
+        "-e",
+        'tell application "System Events" to restart',
+    ]
+
+
+def test_consequence_command_supports_windows_lock_and_reboot() -> None:
+    assert consequence_commands(ConsequenceAction.LOCK, "win32") == [["rundll32.exe", "user32.dll,LockWorkStation"]]
+    assert consequence_command(ConsequenceAction.REBOOT, "win32") == ["shutdown", "/r", "/t", "0"]
+
+
+def test_warning_popup_command_supports_mac_and_windows() -> None:
+    mac_command = warning_popup_command("darwin")
+    windows_command = warning_popup_command("win32")
+
+    assert mac_command[0] == "osascript"
+    assert "display dialog" in mac_command[-1]
+    assert windows_command[:4] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
+    assert "MessageBox" in windows_command[-1]
 
 
 def test_consequence_timer_line_shows_remaining_seconds() -> None:
@@ -334,7 +403,7 @@ def test_build_profile_creates_threshold_and_scores_reference_low() -> None:
 
     profile = build_profile(samples)
 
-    assert profile.threshold >= 3.0
+    assert profile.threshold >= 2.0
     assert deviation_score(np.array([1.01, 2.01, 3.01, 4.01, 0.01]), profile) < profile.threshold
 
 

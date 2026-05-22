@@ -1,6 +1,6 @@
 # Posture Guard
 
-Posture Guard helps a Mac user keep an individually calibrated sitting posture by applying a consequence when their current posture drifts away from their reference posture.
+Posture Guard helps a macOS or Windows user keep an individually calibrated sitting posture by applying a consequence when their current posture drifts away from their reference posture.
 
 ## Language
 

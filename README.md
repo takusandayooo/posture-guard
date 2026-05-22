@@ -1,58 +1,112 @@
 # Posture Guard
 
-Posture Guard calibrates your good sitting posture from the webcam, then turns off Mac Wi-Fi when your posture deviates for long enough.
+Posture Guard は、Web カメラで自分の基準姿勢をキャリブレーションし、その姿勢から一定時間ずれたときに Wi-Fi をオフにする姿勢監視ツールです。姿勢が戻らない場合は、設定に応じて画面ロック、再起動、または何もしない動作を実行できます。
 
-## Setup
+## 対応環境
+
+- macOS
+- Windows
+- Python 3.11 または 3.12
+
+MediaPipe が新しい Python バージョン向けの wheel を提供していない場合があるため、Python は 3.11 または 3.12 を使ってください。
+
+## 主な機能
+
+- Web カメラから姿勢ランドマークを検出
+- ユーザーごとの基準姿勢をキャリブレーション
+- 姿勢のずれが続いたときに Wi-Fi をオフ
+- 警告ポップアップの表示
+- グレースタイマー後の画面ロックまたは再起動
+- Tkinter の設定ウィンドウから各秒数や動作を変更
+- `--dry-run` によるコマンド確認
+
+## セットアップ
 
 ```sh
 uv sync
 ```
 
-This project requires Python 3.11 or 3.12 because MediaPipe may not provide wheels for newer Python versions.
+## 実行方法
 
-## Run
-
-Dry run first:
+まずは dry run で動作を確認してください。dry run では Wi-Fi の変更、画面ロック、再起動は実行されず、実行予定のコマンドだけが表示されます。
 
 ```sh
 uv run posture-guard --dry-run
 ```
 
-Real Wi-Fi control:
+実際に Wi-Fi 制御を有効にして起動する場合:
 
 ```sh
 uv run posture-guard
 ```
 
-Flow:
+## Windows での注意
 
-1. Adjust the settings in the Tkinter settings window.
-2. Sit in your good posture.
-3. Press `c` to start calibration.
-4. The app records your reference posture for the selected calibration time.
-5. Monitoring starts.
-6. When posture deviation starts counting, a warning popup appears if `Popup` is on.
-7. If posture deviation continues for the selected deviation time, Wi-Fi is turned off if that setting is enabled.
-8. If posture does not improve before the grace timer ends, the selected action runs. The default action locks the screen.
-9. Monitoring waits while Wi-Fi is off.
-10. When you manually turn Wi-Fi back on, monitoring resumes.
+Windows では Wi-Fi アダプターの有効化/無効化に PowerShell の `Get-NetAdapter`、`Disable-NetAdapter`、`Enable-NetAdapter` を使います。Wi-Fi を実際にオフにするには、管理者権限でターミナルを起動してください。
 
-Settings window controls:
+自動検出がうまくいかない場合は、アダプター名を指定します。
 
-- `Calibration sec`: reference posture calibration time.
-- `Deviation sec`: Wi-Fi-off delay after posture deviation starts.
-- `Turn Wi-Fi off after deviation`: turn Wi-Fi off or leave it on when the deviation timer ends.
-- `Action`: action after the grace timer ends (`Lock`, `Reboot`, or `None`).
-- `Grace sec`: grace timer before the action runs.
-- `Show warning popup`: show or hide the warning popup.
+```sh
+uv run posture-guard --wifi-device "Wi-Fi"
+```
 
-Keys:
+## macOS での注意
 
-- `c`: start calibration or recalibrate
-- `q`: quit
+macOS では Wi-Fi 制御に `networksetup` を使います。自動検出がうまくいかない場合は、デバイス名を指定します。
 
-The `score / threshold` display shows how far the current posture is from the calibrated reference posture. The score uses shoulder position, head position relative to the shoulders, and shoulder tilt. Shoulder position has a lighter weight than head position so small camera framing shifts do not dominate the score. Wi-Fi shutdown does not start at a tiny crossing like `3.01 / 3.00`; by default it starts when the score is 15% above the threshold. The window shows that value as `Off starts at`.
+```sh
+uv run posture-guard --wifi-device en0
+```
 
-The camera window shows the current action, grace timer, and popup setting. Lock uses display sleep first, so make sure macOS is set to require a password after sleep or screen saver. Reboot uses macOS System Events, so it does not ask for a sudo password. `--dry-run` prints commands instead of running them.
+画面ロックはディスプレイスリープ、ユーザーセッションのサスペンド、スクリーンセーバー起動、キーボードショートカットを順に試します。macOS 側で「スリープまたはスクリーンセーバ開始後にパスワードを要求」が有効になっていることを確認してください。
 
-If calibration fails, increase `Calibration sec` and keep your face and shoulders in frame. Very short calibration times such as 1 second may not collect enough visible-pose samples.
+## 使い方
+
+1. 起動後、設定ウィンドウで秒数や動作を調整します。
+2. よい姿勢で座ります。
+3. カメラ画面で `c` を押してキャリブレーションを開始します。
+4. 指定秒数のあいだ、基準姿勢を記録します。
+5. キャリブレーションが完了すると監視が始まります。
+6. 姿勢のずれが始まると、設定に応じて警告ポップアップが表示されます。
+7. ずれが `Deviation sec` 以上続くと、Wi-Fi オフ設定が有効な場合に Wi-Fi をオフにします。
+8. さらに姿勢が戻らないまま `Grace sec` が終わると、選択した `Action` を実行します。
+9. Wi-Fi がオフになった後は、手動で Wi-Fi をオンに戻すまで監視を待機します。
+10. 手動復帰を検知すると監視を再開します。
+
+## 設定項目
+
+- `Calibration sec`: 基準姿勢を記録する秒数
+- `Deviation sec`: 姿勢のずれを検知してから Wi-Fi をオフにするまでの秒数
+- `Turn Wi-Fi off after deviation`: 姿勢のずれが続いたときに Wi-Fi をオフにするかどうか
+- `Action`: グレースタイマー後に実行する動作。`Lock`、`Reboot`、`None` から選択
+- `Grace sec`: `Action` を実行するまでの猶予秒数
+- `Show warning popup`: 警告ポップアップを表示するかどうか
+
+## キー操作
+
+- `c`: キャリブレーション開始、または再キャリブレーション
+- `q`: 終了
+
+## 姿勢判定について
+
+画面の `score / threshold` は、現在の姿勢がキャリブレーションした基準姿勢からどれだけ離れているかを示します。スコアは肩の位置、肩に対する頭の位置、肩の傾きを使って計算します。
+
+小さなカメラ位置のずれで過剰反応しないように、肩の位置は頭の位置より軽く扱います。また、`3.01 / 3.00` のようなわずかな超過では Wi-Fi オフのカウントを始めません。デフォルトでは、スコアがしきい値より 15% 高くなった時点からカウントを開始します。この値はカメラ画面に `Off starts at` として表示されます。
+
+## トラブルシューティング
+
+キャリブレーションに失敗する場合は、`Calibration sec` を長めに設定し、顔と両肩がカメラに入るようにしてください。1 秒などの短い設定では、必要なサンプル数が集まらないことがあります。
+
+カメラが開けない場合は、OS のカメラ権限を確認し、必要に応じて `--camera` で別のカメラインデックスを指定してください。
+
+```sh
+uv run posture-guard --camera 1
+```
+
+## 開発
+
+テストを実行する場合:
+
+```sh
+uv run pytest
+```

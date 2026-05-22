@@ -12,6 +12,16 @@ from typing import Iterable
 
 import numpy as np
 
+WINDOWS_WIFI_DISCOVERY_SCRIPT = (
+    "$adapter = Get-NetAdapter -Physical -ErrorAction Stop | "
+    "Where-Object { $_.Name -match 'Wi-?Fi|Wireless|WLAN' -or "
+    "$_.InterfaceDescription -match 'Wi-?Fi|Wireless|WLAN' } | "
+    "Select-Object -First 1; "
+    "if ($null -eq $adapter) { exit 2 }; "
+    "$adapter.Name"
+)
+WARNING_POPUP_MESSAGE = "姿勢の崩れを検知しました。タイマーが終わる前に姿勢を直すか、この警告を閉じてください。"
+
 
 class MonitorState(Enum):
     READY = "ready"
@@ -47,24 +57,25 @@ class MonitorSettings:
 class WifiController:
     device: str
     dry_run: bool
+    os_name: str = sys.platform
 
     @classmethod
-    def create(cls, device: str, dry_run: bool) -> "WifiController":
-        return cls(device=discover_wifi_device() if device == "auto" else device, dry_run=dry_run)
+    def create(cls, device: str, dry_run: bool, os_name: str | None = None) -> "WifiController":
+        platform_name = sys.platform if os_name is None else os_name
+        return cls(
+            device=discover_wifi_device(platform_name) if device == "auto" else device,
+            dry_run=dry_run,
+            os_name=platform_name,
+        )
 
     def is_on(self) -> bool:
-        result = subprocess.run(
-            ["networksetup", "-getairportpower", self.device],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = subprocess.run(wifi_power_command(self.device, self.os_name), capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
-        return "On" in result.stdout
+        return wifi_power_is_on(result.stdout, self.os_name)
 
     def turn_off(self) -> None:
-        command = ["networksetup", "-setairportpower", self.device, "off"]
+        command = wifi_set_power_command(self.device, False, self.os_name)
         if self.dry_run:
             print(f"[dry-run] would run: {' '.join(command)}")
             return
@@ -77,7 +88,7 @@ class WifiController:
             raise RuntimeError("Wi-Fi off command completed, but Wi-Fi is still reported as On.")
 
     def turn_on(self) -> None:
-        command = ["networksetup", "-setairportpower", self.device, "on"]
+        command = wifi_set_power_command(self.device, True, self.os_name)
         if self.dry_run:
             print(f"[dry-run] would run: {' '.join(command)}")
             return
@@ -90,17 +101,14 @@ class WifiController:
 @dataclass
 class PostureWarningPopup:
     process: Popen[str] | None = None
+    os_name: str = sys.platform
 
     def show_count_started(self) -> None:
         if self.is_open():
             return
 
-        script = (
-            'display dialog "姿勢の崩れを検知しました。タイマーが終わる前に姿勢を直すか、この警告を閉じてください。" '
-            'buttons {"Dismiss"} default button "Dismiss" with icon caution giving up after 86400'
-        )
         self.process = subprocess.Popen(
-            ["osascript", "-e", script],
+            warning_popup_command(self.os_name),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -126,6 +134,7 @@ class PostureWarningPopup:
 class ConsequenceController:
     action: ConsequenceAction
     dry_run: bool
+    os_name: str = sys.platform
 
     def run(self) -> None:
         if self.action is ConsequenceAction.NONE:
@@ -133,7 +142,7 @@ class ConsequenceController:
             return
 
         errors: list[str] = []
-        for command in consequence_commands(self.action):
+        for command in consequence_commands(self.action, self.os_name):
             if self.dry_run:
                 print(f"[dry-run] would run: {' '.join(command)}")
                 return
@@ -150,12 +159,30 @@ class ConsequenceController:
         raise RuntimeError("; ".join(error for error in errors if error) or f"Could not run {self.action.value}.")
 
 
-def consequence_command(action: ConsequenceAction) -> list[str]:
-    return consequence_commands(action)[0]
+def is_windows(os_name: str = sys.platform) -> bool:
+    return os_name.startswith("win")
 
 
-def consequence_commands(action: ConsequenceAction) -> list[list[str]]:
+def ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def applescript_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def powershell_command(script: str) -> list[str]:
+    return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
+
+
+def consequence_command(action: ConsequenceAction, os_name: str = sys.platform) -> list[str]:
+    return consequence_commands(action, os_name)[0]
+
+
+def consequence_commands(action: ConsequenceAction, os_name: str = sys.platform) -> list[list[str]]:
     if action is ConsequenceAction.LOCK:
+        if is_windows(os_name):
+            return [["rundll32.exe", "user32.dll,LockWorkStation"]]
         commands = [["/usr/bin/pmset", "displaysleepnow"]]
         cg_session = "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"
         if os.path.exists(cg_session):
@@ -170,6 +197,8 @@ def consequence_commands(action: ConsequenceAction) -> list[list[str]]:
         )
         return commands
     if action is ConsequenceAction.REBOOT:
+        if is_windows(os_name):
+            return [["shutdown", "/r", "/t", "0"]]
         return [["osascript", "-e", 'tell application "System Events" to restart']]
     raise ValueError(f"No command for consequence action: {action.value}")
 
@@ -183,7 +212,59 @@ def initial_consequence_action_value(action: ConsequenceAction) -> int:
     return [ConsequenceAction.LOCK, ConsequenceAction.REBOOT, ConsequenceAction.NONE].index(action)
 
 
-def discover_wifi_device() -> str:
+def warning_popup_command(os_name: str = sys.platform) -> list[str]:
+    if is_windows(os_name):
+        script = (
+            "Add-Type -AssemblyName PresentationFramework; "
+            f"[System.Windows.MessageBox]::Show({ps_quote(WARNING_POPUP_MESSAGE)}, "
+            "'Posture Guard', 'OK', 'Warning')"
+        )
+        return powershell_command(script)
+    script = (
+        f"display dialog {applescript_quote(WARNING_POPUP_MESSAGE)} "
+        'buttons {"Dismiss"} default button "Dismiss" with icon caution giving up after 86400'
+    )
+    return ["osascript", "-e", script]
+
+
+def wifi_power_command(device: str, os_name: str = sys.platform) -> list[str]:
+    if is_windows(os_name):
+        script = (
+            f"$adapter = Get-NetAdapter -Name {ps_quote(device)} -ErrorAction Stop; "
+            "if ($adapter.Status -eq 'Disabled') { 'Off' } else { 'On' }"
+        )
+        return powershell_command(script)
+    return ["networksetup", "-getairportpower", device]
+
+
+def wifi_set_power_command(device: str, enabled: bool, os_name: str = sys.platform) -> list[str]:
+    if is_windows(os_name):
+        cmdlet = "Enable-NetAdapter" if enabled else "Disable-NetAdapter"
+        return powershell_command(f"{cmdlet} -Name {ps_quote(device)} -Confirm:$false")
+    return ["networksetup", "-setairportpower", device, "on" if enabled else "off"]
+
+
+def wifi_power_is_on(output: str, os_name: str = sys.platform) -> bool:
+    if is_windows(os_name):
+        return output.strip().lower() == "on"
+    return "On" in output
+
+
+def discover_wifi_device(os_name: str = sys.platform) -> str:
+    if is_windows(os_name):
+        result = subprocess.run(
+            powershell_command(WINDOWS_WIFI_DISCOVERY_SCRIPT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Could not discover Wi-Fi adapter.")
+        for line in result.stdout.splitlines():
+            if line.strip():
+                return line.strip()
+        raise RuntimeError("Could not discover Wi-Fi adapter. Pass --wifi-device, for example --wifi-device Wi-Fi.")
+
     result = subprocess.run(
         ["networksetup", "-listallhardwareports"],
         capture_output=True,
@@ -429,9 +510,9 @@ def settings_lines(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Calibrate posture and turn off Mac Wi-Fi after sustained deviation.")
+    parser = argparse.ArgumentParser(description="Calibrate posture and turn off Wi-Fi after sustained deviation.")
     parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index.")
-    parser.add_argument("--wifi-device", default="auto", help="Wi-Fi device, or auto. Usually en0 on Mac.")
+    parser.add_argument("--wifi-device", default="auto", help="Wi-Fi device or adapter name, or auto.")
     parser.add_argument("--dry-run", action="store_true", help="Do not turn Wi-Fi off; print the command instead.")
     parser.add_argument("--calibration-seconds", type=int, default=10)
     parser.add_argument("--deviation-seconds", type=int, default=5)
